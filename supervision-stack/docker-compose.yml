@@ -1,0 +1,232 @@
+name: supervision
+
+services:
+  # =====================  GLPI  =====================
+  glpi:
+    build:
+      context: .
+      dockerfile: Dockerfile.glpi
+      args:
+        GLPI_VERSION: ${GLPI_VERSION}
+    container_name: glpi
+    restart: unless-stopped
+    environment:
+      TZ: ${TZ}
+    ports:
+      - "8080:80"
+    volumes:
+      - glpi_config:/var/www/html/config
+      - glpi_files:/var/www/html/files
+      - glpi_plugins:/var/www/html/plugins
+    depends_on:
+      glpi-db:
+        condition: service_healthy
+    networks: [glpi_net]
+
+  glpi-db:
+    image: mariadb:11
+    container_name: glpi-db
+    restart: unless-stopped
+    environment:
+      MARIADB_ROOT_PASSWORD: ${GLPI_DB_ROOT_PASSWORD}
+      MARIADB_DATABASE: ${GLPI_DB_NAME}
+      MARIADB_USER: ${GLPI_DB_USER}
+      MARIADB_PASSWORD: ${GLPI_DB_PASSWORD}
+      TZ: ${TZ}
+    volumes:
+      - glpi_db:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [glpi_net]
+
+  # =====================  ZABBIX  =====================
+  zabbix-db:
+    image: mysql:8.0
+    container_name: zabbix-db
+    restart: unless-stopped
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_bin", "--log_bin_trust_function_creators=1"]
+    environment:
+      MYSQL_ROOT_PASSWORD: ${ZBX_DB_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${ZBX_DB_NAME}
+      MYSQL_USER: ${ZBX_DB_USER}
+      MYSQL_PASSWORD: ${ZBX_DB_PASSWORD}
+      TZ: ${TZ}
+    volumes:
+      - zabbix_db:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-p${ZBX_DB_ROOT_PASSWORD}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [zabbix_net]
+
+  zabbix-server:
+    build:
+      context: .
+      dockerfile: Dockerfile.zabbix-server
+      args:
+        ZABBIX_VERSION: ${ZABBIX_VERSION}
+    container_name: zabbix-server
+    restart: unless-stopped
+    environment:
+      DB_SERVER_HOST: zabbix-db
+      MYSQL_DATABASE: ${ZBX_DB_NAME}
+      MYSQL_USER: ${ZBX_DB_USER}
+      MYSQL_PASSWORD: ${ZBX_DB_PASSWORD}
+      TZ: ${TZ}
+    ports:
+      - "10051:10051"
+    depends_on:
+      zabbix-db:
+        condition: service_healthy
+    networks: [zabbix_net]
+
+  zabbix-web:
+    build:
+      context: .
+      dockerfile: Dockerfile.zabbix-web
+      args:
+        ZABBIX_VERSION: ${ZABBIX_VERSION}
+    container_name: zabbix-web
+    restart: unless-stopped
+    environment:
+      ZBX_SERVER_HOST: zabbix-server
+      DB_SERVER_HOST: zabbix-db
+      MYSQL_DATABASE: ${ZBX_DB_NAME}
+      MYSQL_USER: ${ZBX_DB_USER}
+      MYSQL_PASSWORD: ${ZBX_DB_PASSWORD}
+      PHP_TZ: ${TZ}
+    ports:
+      - "8081:8080"
+    depends_on:
+      - zabbix-server
+    networks: [zabbix_net]
+
+  # =====================  WAZUH (single-node)  =====================
+  wazuh.manager:
+    build:
+      context: .
+      dockerfile: Dockerfile.wazuh-manager
+      args:
+        WAZUH_VERSION: ${WAZUH_VERSION}
+    container_name: wazuh-manager
+    hostname: wazuh.manager
+    restart: unless-stopped
+    ulimits:
+      memlock: { soft: -1, hard: -1 }
+      nofile: { soft: 655360, hard: 655360 }
+    ports:
+      - "1514:1514"
+      - "1515:1515"
+      - "514:514/udp"
+      - "55000:55000"
+    environment:
+      INDEXER_URL: https://wazuh.indexer:9200
+      INDEXER_USERNAME: ${INDEXER_USERNAME}
+      INDEXER_PASSWORD: ${INDEXER_PASSWORD}
+      FILEBEAT_SSL_VERIFICATION_MODE: full
+      SSL_CERTIFICATE_AUTHORITIES: /etc/ssl/root-ca.pem
+      SSL_CERTIFICATE: /etc/ssl/filebeat.pem
+      SSL_KEY: /etc/ssl/filebeat.key
+      API_USERNAME: ${API_USERNAME}
+      API_PASSWORD: ${API_PASSWORD}
+    volumes:
+      - wazuh_api_configuration:/var/ossec/api/configuration
+      - wazuh_etc:/var/ossec/etc
+      - wazuh_logs:/var/ossec/logs
+      - wazuh_queue:/var/ossec/queue
+      - wazuh_var_multigroups:/var/ossec/var/multigroups
+      - wazuh_integrations:/var/ossec/integrations
+      - wazuh_active_response:/var/ossec/active-response/bin
+      - wazuh_agentless:/var/ossec/agentless
+      - wazuh_wodles:/var/ossec/wodles
+      - filebeat_etc:/etc/filebeat
+      - filebeat_var:/var/lib/filebeat
+      - ./wazuh/config/wazuh_indexer_ssl_certs/root-ca-manager.pem:/etc/ssl/root-ca.pem:ro
+      - ./wazuh/config/wazuh_indexer_ssl_certs/wazuh.manager.pem:/etc/ssl/filebeat.pem:ro
+      - ./wazuh/config/wazuh_indexer_ssl_certs/wazuh.manager-key.pem:/etc/ssl/filebeat.key:ro
+    depends_on:
+      - wazuh.indexer
+    networks: [wazuh_net]
+
+  wazuh.indexer:
+    build:
+      context: .
+      dockerfile: Dockerfile.wazuh-indexer
+      args:
+        WAZUH_VERSION: ${WAZUH_VERSION}
+    container_name: wazuh-indexer
+    hostname: wazuh.indexer
+    restart: unless-stopped
+    environment:
+      OPENSEARCH_JAVA_OPTS: "-Xms1g -Xmx1g"
+    ulimits:
+      memlock: { soft: -1, hard: -1 }
+      nofile: { soft: 65536, hard: 65536 }
+    # 9200 intentionally NOT published to the host
+    volumes:
+      - wazuh_indexer_data:/var/lib/wazuh-indexer
+      - ./wazuh/config/wazuh_indexer_ssl_certs/root-ca.pem:/usr/share/wazuh-indexer/certs/root-ca.pem:ro
+      - ./wazuh/config/wazuh_indexer_ssl_certs/wazuh.indexer-key.pem:/usr/share/wazuh-indexer/certs/wazuh.indexer.key:ro
+      - ./wazuh/config/wazuh_indexer_ssl_certs/wazuh.indexer.pem:/usr/share/wazuh-indexer/certs/wazuh.indexer.pem:ro
+      - ./wazuh/config/wazuh_indexer_ssl_certs/admin.pem:/usr/share/wazuh-indexer/certs/admin.pem:ro
+      - ./wazuh/config/wazuh_indexer_ssl_certs/admin-key.pem:/usr/share/wazuh-indexer/certs/admin-key.pem:ro
+      - ./wazuh/config/wazuh_indexer/wazuh.indexer.yml:/usr/share/wazuh-indexer/opensearch.yml:ro
+    networks: [wazuh_net]
+
+  wazuh.dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile.wazuh-dashboard
+      args:
+        WAZUH_VERSION: ${WAZUH_VERSION}
+    container_name: wazuh-dashboard
+    hostname: wazuh.dashboard
+    restart: unless-stopped
+    ports:
+      - "8443:5601"   # https://localhost:8443
+    environment:
+      INDEXER_USERNAME: ${INDEXER_USERNAME}
+      INDEXER_PASSWORD: ${INDEXER_PASSWORD}
+      WAZUH_API_URL: https://wazuh.manager
+      DASHBOARD_USERNAME: ${DASHBOARD_USERNAME}
+      DASHBOARD_PASSWORD: ${DASHBOARD_PASSWORD}
+      API_USERNAME: ${API_USERNAME}
+      API_PASSWORD: ${API_PASSWORD}
+    volumes:
+      - ./wazuh/config/wazuh_indexer_ssl_certs/wazuh.dashboard.pem:/usr/share/wazuh-dashboard/certs/wazuh-dashboard.pem:ro
+      - ./wazuh/config/wazuh_indexer_ssl_certs/wazuh.dashboard-key.pem:/usr/share/wazuh-dashboard/certs/wazuh-dashboard-key.pem:ro
+      - ./wazuh/config/wazuh_indexer_ssl_certs/root-ca.pem:/usr/share/wazuh-dashboard/certs/root-ca.pem:ro
+      - ./wazuh/config/wazuh_dashboard/opensearch_dashboards.yml:/usr/share/wazuh-dashboard/config/opensearch_dashboards.yml:ro
+      - ./wazuh/config/wazuh_dashboard/wazuh.yml:/usr/share/wazuh-dashboard/data/wazuh/config/wazuh.yml:ro
+    depends_on:
+      - wazuh.indexer
+      - wazuh.manager
+    networks: [wazuh_net]
+
+networks:
+  glpi_net:
+  zabbix_net:
+  wazuh_net:
+
+volumes:
+  glpi_config:
+  glpi_files:
+  glpi_plugins:
+  glpi_db:
+  zabbix_db:
+  wazuh_api_configuration:
+  wazuh_etc:
+  wazuh_logs:
+  wazuh_queue:
+  wazuh_var_multigroups:
+  wazuh_integrations:
+  wazuh_active_response:
+  wazuh_agentless:
+  wazuh_wodles:
+  filebeat_etc:
+  filebeat_var:
+  wazuh_indexer_data:

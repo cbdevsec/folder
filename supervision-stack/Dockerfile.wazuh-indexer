@@ -1,0 +1,2 @@
+ARG WAZUH_VERSION=4.9.2
+FROM wazuh/wazuh-indexer:${WAZUH_VERSION}

@@ -1,0 +1,4 @@
+ARG WAZUH_VERSION=4.9.2
+FROM wazuh/wazuh-manager:${WAZUH_VERSION}
+# Custom rules/decoders can be copied in here, e.g.:
+# COPY local_rules.xml /var/ossec/etc/rules/local_rules.xml

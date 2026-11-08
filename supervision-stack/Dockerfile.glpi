@@ -1,0 +1,25 @@
+FROM php:8.3-apache
+
+ARG GLPI_VERSION=10.0.17
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      libpng-dev libjpeg-dev libfreetype6-dev libicu-dev libzip-dev \
+      libldap2-dev libbz2-dev libxml2-dev libonig-dev curl ca-certificates \
+    && docker-php-ext-configure gd --with-freetype --with-jpeg \
+    && docker-php-ext-configure ldap \
+    && docker-php-ext-install -j"$(nproc)" gd intl mysqli zip ldap bz2 exif opcache bcmath xml mbstring \
+    && pecl install apcu && docker-php-ext-enable apcu \
+    && a2enmod rewrite \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN curl -fsSL "https://github.com/glpi-project/glpi/releases/download/${GLPI_VERSION}/glpi-${GLPI_VERSION}.tgz" \
+      | tar -xz -C /var/www/html --strip-components=1 \
+    && chown -R www-data:www-data /var/www/html
+
+# GLPI recommended PHP settings
+RUN { echo 'session.cookie_httponly=On'; echo 'memory_limit=256M'; \
+      echo 'upload_max_filesize=20M'; echo 'post_max_size=20M'; \
+      echo 'max_execution_time=60'; } > /usr/local/etc/php/conf.d/glpi.ini
+
+VOLUME ["/var/www/html/config", "/var/www/html/files", "/var/www/html/plugins"]
+EXPOSE 80

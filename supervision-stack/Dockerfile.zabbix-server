@@ -1,0 +1,5 @@
+ARG ZABBIX_VERSION=7.0
+FROM zabbix/zabbix-server-mysql:alpine-${ZABBIX_VERSION}-latest
+# Add custom alert scripts / externalscripts here if needed:
+# COPY ./alertscripts/ /usr/lib/zabbix/alertscripts/
+EXPOSE 10051
